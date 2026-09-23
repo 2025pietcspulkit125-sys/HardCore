@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { maskSensitiveValue, useMaskingPreference } from "./lib/masking";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 type CaseRecord = { case_id: string; created_at: string; subject: string; sender: string; classification: string; risk_score: number; risk_level: string };
 type AlertRecord = { alert_id: string; case_id: string; severity: string; title: string; message: string; created_at: string; acknowledged: number };

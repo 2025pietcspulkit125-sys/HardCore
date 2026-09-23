@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { MASKING_EVENT, MASKING_STORAGE_KEY } from "../lib/masking";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 type DatabaseStatus = { engine?: string; case_count?: number; alert_count?: number; audit_event_count?: number };
 type Provider = { enabled?: boolean; requires_key?: boolean };

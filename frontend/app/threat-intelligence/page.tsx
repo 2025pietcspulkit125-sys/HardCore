@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import type { InfrastructurePoint } from "./InfrastructureMap";
 import { maskSensitiveValue, useMaskingPreference } from "../lib/masking";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
 const InfrastructureMap = dynamic(() => import("./InfrastructureMap"), { ssr: false });
 
 type ProviderState = {
@@ -405,7 +407,7 @@ export default function ThreatIntelligencePage() {
 
         if (caseId) {
           const response = await fetch(
-            `http://127.0.0.1:8000/api/investigations/${encodeURIComponent(caseId)}/analysis`,
+            `${API_BASE}/api/investigations/${encodeURIComponent(caseId)}/analysis`,
             { cache: "no-store" }
           );
           const data = await response.json();
@@ -437,7 +439,7 @@ export default function ThreatIntelligencePage() {
     setError("");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/threat-intelligence", {
+      const response = await fetch(`${API_BASE}/api/threat-intelligence`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

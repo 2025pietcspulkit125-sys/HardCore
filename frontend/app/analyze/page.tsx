@@ -3,6 +3,7 @@
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 /* ============================================================
    TYPES
@@ -195,7 +196,7 @@ export default function AnalyzeEmail() {
       try {
         setError("");
         const response = await fetch(
-          `http://127.0.0.1:8000/api/investigations/${encodeURIComponent(caseId)}/analysis`,
+          `${API_BASE}/api/investigations/${encodeURIComponent(caseId)}/analysis`,
           { cache: "no-store" }
         );
 
@@ -356,7 +357,7 @@ export default function AnalyzeEmail() {
       );
 
       const response = await fetch(
-        "http://127.0.0.1:8000/api/analyze",
+        `${API_BASE}/api/analyze`,
         {
           method: "POST",
           body: formData,

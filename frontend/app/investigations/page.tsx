@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { maskSensitiveValue, useMaskingPreference } from "../lib/masking";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
 type CaseRecord = {
   case_id: string;
   evidence_id: string;
@@ -144,7 +146,7 @@ export default function InvestigationsPage() {
     setError("");
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/investigations?limit=200", {
+      const response = await fetch(`${API_BASE}/api/investigations?limit=200`, {
         cache: "no-store",
       });
 
@@ -212,7 +214,7 @@ export default function InvestigationsPage() {
     setError("");
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/correlation/${encodeURIComponent(caseId)}`, {
+      const response = await fetch(`${API_BASE}/api/correlation/${encodeURIComponent(caseId)}`, {
         cache: "no-store",
       });
 
