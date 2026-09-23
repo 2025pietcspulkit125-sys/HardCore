@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
-ARTIFACT_PATH = Path(__file__).resolve().parent.parent / "ml_data" / "model_artifact.json"
+ARTIFACT_PATH = Path(__file__).resolve().parent / "ml_data" / "model_artifact.json"
 
 def _tokens(text):
     return TOKEN_RE.findall((text or "").lower())
