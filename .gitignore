@@ -35,3 +35,6 @@ htmlcov/
 # Generated files
 *.tmp
 *.temp
+# Local database files
+*.db
+*.db-*
