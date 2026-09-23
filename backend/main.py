@@ -42,6 +42,7 @@ allowed_origins = list(dict.fromkeys([
     "http://127.0.0.1:3000",
     "https://frontend-seven-swart-94.vercel.app",
     "https://mailtraceai-rb5eij4yr-pulkitjoshi272006-8842.vercel.app",
+    "https://mailtraceai-34rq0a04h-pulkitjoshi272006-8842.vercel.app",
     *configured_origins,
 ]))
 
@@ -1396,7 +1397,7 @@ def calculate_risk_score(
 ):
 
     # ========================================================
-    # 1. AUTHENTICATION Ã¢â‚¬â€ MAX 25
+    # 1. AUTHENTICATION ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 25
     # ========================================================
 
     authentication_score = 0
@@ -1432,7 +1433,7 @@ def calculate_risk_score(
     )
 
     # ========================================================
-    # 2. URL / DOMAIN Ã¢â‚¬â€ MAX 20
+    # 2. URL / DOMAIN ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 20
     # ========================================================
 
     url_score = 0
@@ -1475,7 +1476,7 @@ def calculate_risk_score(
     )
 
     # ========================================================
-    # 3. CONTENT / SOCIAL ENGINEERING Ã¢â‚¬â€ MAX 20
+    # 3. CONTENT / SOCIAL ENGINEERING ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 20
     # ========================================================
 
     content_score = 0
@@ -1540,7 +1541,7 @@ def calculate_risk_score(
     )
 
     # ========================================================
-    # 4. INFRASTRUCTURE Ã¢â‚¬â€ MAX 15
+    # 4. INFRASTRUCTURE ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 15
     # ========================================================
 
     infrastructure_score = 0
@@ -1577,7 +1578,7 @@ def calculate_risk_score(
     )
 
     # ========================================================
-    # 5. ATTACHMENTS Ã¢â‚¬â€ MAX 10
+    # 5. ATTACHMENTS ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 10
     # ========================================================
 
     attachment_score = 0
@@ -1613,7 +1614,7 @@ def calculate_risk_score(
     )
 
     # ========================================================
-    # 6. CORRELATION Ã¢â‚¬â€ MAX 10
+    # 6. CORRELATION ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â MAX 10
     # ========================================================
 
     # Historical campaign correlation will be connected
@@ -3955,7 +3956,7 @@ def _ai_investigator_answer(case_id: str, question: str):
             reasons = list(threat.get("evidence") or [])[:6]
         answer = (
             f"Case {case_id} is classified as {classification or 'UNKNOWN'} with a {risk_level or 'UNKNOWN'} risk level, "
-            f"score {risk_score if risk_score is not None else 'Ã¢â‚¬â€'}/100 and {confidence or 'UNKNOWN'} confidence. "
+            f"score {risk_score if risk_score is not None else 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}/100 and {confidence or 'UNKNOWN'} confidence. "
             + ("The main recorded signals are " + "; ".join(map(str, reasons[:6])) + "." if reasons else "No detailed risk components were stored.")
         )
         facts = reasons[:8]
@@ -3990,8 +3991,8 @@ def _ai_investigator_answer(case_id: str, question: str):
 
     elif any(term in q for term in ["sender", "from", "reply-to", "return-path", "impersonat"]):
         answer = (
-            f"From: {email.get('from') or 'Ã¢â‚¬â€'}. Reply-To: {email.get('reply_to') or 'Ã¢â‚¬â€'}. "
-            f"Return-Path: {email.get('return_path') or 'Ã¢â‚¬â€'}. "
+            f"From: {email.get('from') or 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}. Reply-To: {email.get('reply_to') or 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}. "
+            f"Return-Path: {email.get('return_path') or 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}. "
             f"Impersonation assessment: {json.dumps(impersonation, ensure_ascii=False)}"
         )
         facts = [email.get("from"), email.get("reply_to"), email.get("return_path")]
@@ -4004,7 +4005,7 @@ def _ai_investigator_answer(case_id: str, question: str):
             f"There are {len(smtp_relay)} parsed SMTP/Received hops. "
             "This identifies observed email infrastructure, not the sender's physical location or identity."
         )
-        facts = [f"Received hops: {len(smtp_relay)}", f"Candidate IP: {candidate.get('ip') or 'Ã¢â‚¬â€'}"]
+        facts = [f"Received hops: {len(smtp_relay)}", f"Candidate IP: {candidate.get('ip') or 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}"]
 
     elif any(term in q for term in ["attachment", "file"]):
         names = [a.get("filename") for a in attachments if isinstance(a, dict) and a.get("filename")]
@@ -4016,7 +4017,7 @@ def _ai_investigator_answer(case_id: str, question: str):
         if related:
             lines = []
             for match in related[:5]:
-                lines.append(f"{match.get('case_id')}: {match.get('similarity_score', 0)}/100 Ã¢â‚¬â€ {', '.join(match.get('reasons') or [])}")
+                lines.append(f"{match.get('case_id')}: {match.get('similarity_score', 0)}/100 ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â {', '.join(match.get('reasons') or [])}")
             answer = "Related investigations based on shared observable indicators:\n" + "\n".join(lines)
             facts = [x.get("case_id") for x in related[:5]]
         else:
@@ -4025,7 +4026,7 @@ def _ai_investigator_answer(case_id: str, question: str):
     elif any(term in q for term in ["summary", "overview", "what happened", "explain this email"]):
         answer = (
             f"{threat.get('summary') or 'No summary was stored.'} "
-            f"The message subject is '{email.get('subject') or 'Ã¢â‚¬â€'}'. "
+            f"The message subject is '{email.get('subject') or 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}'. "
             f"Observed indicators include {len(indicators.get('ips') or [])} IP(s) and {len(indicators.get('urls') or [])} URL(s), "
             f"with {len(smtp_relay)} SMTP/Received hop(s) and {len(attachments)} attachment(s)."
         )
@@ -4033,7 +4034,7 @@ def _ai_investigator_answer(case_id: str, question: str):
     else:
         answer = (
             f"I reviewed case {case_id}. It is {classification or 'UNKNOWN'} / {risk_level or 'UNKNOWN'} "
-            f"with score {risk_score if risk_score is not None else 'Ã¢â‚¬â€'}/100 and {confidence or 'UNKNOWN'} confidence. "
+            f"with score {risk_score if risk_score is not None else 'ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â'}/100 and {confidence or 'UNKNOWN'} confidence. "
             "Try asking about risk, IOCs, authentication, sender identity signals, SMTP relay, attachments, or related cases."
         )
 
@@ -4365,12 +4366,12 @@ def download_forensic_report_pdf(case_id: str):
 
     def safe(value):
         if value is None or value == "":
-            return "Ã¢â‚¬â€"
+            return "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"
         return str(value)
 
     def multiline(items):
         if not items:
-            return "Ã¢â‚¬â€"
+            return "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"
         return "<br/>".join(safe(item) for item in items[:20])
 
     buffer = BytesIO()
@@ -4488,7 +4489,7 @@ def download_forensic_report_pdf(case_id: str):
     limitations = analysis.get("threat_detection", {}).get("limitations") or []
     story.append(Paragraph("Forensic Limitations", styles["Section"]))
     for item in limitations:
-        story.append(Paragraph("Ã¢â‚¬Â¢ " + safe(item), styles["Small"]))
+        story.append(Paragraph("ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ " + safe(item), styles["Small"]))
 
     document.build(story)
     buffer.seek(0)
