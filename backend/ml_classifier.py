@@ -1,11 +1,13 @@
 """Small offline, transparent classifier for demo-time email triage."""
 import json
 import math
+import os
 import re
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
-ARTIFACT_PATH = Path(__file__).resolve().parent / "ml_data" / "model_artifact.json"
+BUNDLED_ARTIFACT_PATH = Path(__file__).resolve().parent / "ml_data" / "model_artifact.json"
+ARTIFACT_PATH = Path(os.getenv("ML_MODEL_PATH") or BUNDLED_ARTIFACT_PATH)
 
 def _tokens(text):
     return TOKEN_RE.findall((text or "").lower())
@@ -38,12 +40,17 @@ def classify(subject, body, sender, urls=None, attachments=None):
     best = max(scores, key=scores.get)
     peak = scores[best]
     probabilities = {label: math.exp(score - peak) for label, score in scores.items()}
-    confidence = probabilities[best] / (sum(probabilities.values()) or 1)
+    total_probability = sum(probabilities.values()) or 1
+    probabilities = {label: round(value / total_probability, 4) for label, value in probabilities.items()}
+    confidence = probabilities[best]
     return {
         "ml_classification": best,
         "ml_confidence": round(confidence, 4),
+        "ml_probabilities": probabilities,
         "ml_features_used": ["subject", "body", "sender", "urls", "attachments", "token-likelihoods"],
         "ml_model": MODEL.get("model", "bundled-local-multinomial-demo-classifier"),
+        "model_version": MODEL.get("model_version", MODEL.get("model", "unknown")),
+        "dataset_version": MODEL.get("dataset_version", "unknown"),
         "ml_validation_metrics": MODEL.get("validation_metrics", {}),
         "ml_disclaimer": "Locally trained lightweight classifier suitable for prototype/SIH demonstration; it does not represent real-world threat prevalence.",
     }

@@ -127,6 +127,14 @@
     "BEC_FRAUD": 19,
     "MALWARE": 17
   },
+  "label_counts": {
+    "LEGITIMATE": 2,
+    "SUSPICIOUS": 2,
+    "PHISHING": 2,
+    "IMPERSONATION": 2,
+    "BEC_FRAUD": 2,
+    "MALWARE": 2
+  },
   "vocabulary": [
     "account",
     "accounts",
@@ -210,7 +218,17 @@
     "wire",
     "zip"
   ],
-  "model": "bundled-local-multinomial-demo-classifier",
+  "model": "mailtrace-local-multinomial-v2",
+  "model_version": "mailtrace-local-multinomial-v2",
+  "dataset_version": "seed-synthetic-2026-09-23",
+  "class_counts": {
+    "LEGITIMATE": 2,
+    "SUSPICIOUS": 2,
+    "PHISHING": 2,
+    "IMPERSONATION": 2,
+    "BEC_FRAUD": 2,
+    "MALWARE": 2
+  },
   "validation_metrics": {
     "accuracy": 0.3333,
     "macro": {
@@ -222,34 +240,92 @@
       "LEGITIMATE": {
         "precision": 0.0,
         "recall": 0.0,
-        "f1": 0.0
+        "f1": 0.0,
+        "support": 1
       },
       "SUSPICIOUS": {
         "precision": 0.0,
         "recall": 0.0,
-        "f1": 0.0
+        "f1": 0.0,
+        "support": 1
       },
       "PHISHING": {
         "precision": 0.3333,
         "recall": 1.0,
-        "f1": 0.5
+        "f1": 0.5,
+        "support": 1
       },
       "IMPERSONATION": {
         "precision": 0.0,
         "recall": 0.0,
-        "f1": 0.0
+        "f1": 0.0,
+        "support": 1
       },
       "BEC_FRAUD": {
         "precision": 0.0,
         "recall": 0.0,
-        "f1": 0.0
+        "f1": 0.0,
+        "support": 1
       },
       "MALWARE": {
         "precision": 1.0,
         "recall": 1.0,
-        "f1": 1.0
+        "f1": 1.0,
+        "support": 1
       }
     },
-    "validation_size": 6
-  }
+    "confusion_matrix": {
+      "LEGITIMATE": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 1,
+        "PHISHING": 0,
+        "IMPERSONATION": 0,
+        "BEC_FRAUD": 0,
+        "MALWARE": 0
+      },
+      "SUSPICIOUS": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 0,
+        "PHISHING": 1,
+        "IMPERSONATION": 0,
+        "BEC_FRAUD": 0,
+        "MALWARE": 0
+      },
+      "PHISHING": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 0,
+        "PHISHING": 1,
+        "IMPERSONATION": 0,
+        "BEC_FRAUD": 0,
+        "MALWARE": 0
+      },
+      "IMPERSONATION": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 0,
+        "PHISHING": 1,
+        "IMPERSONATION": 0,
+        "BEC_FRAUD": 0,
+        "MALWARE": 0
+      },
+      "BEC_FRAUD": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 0,
+        "PHISHING": 0,
+        "IMPERSONATION": 1,
+        "BEC_FRAUD": 0,
+        "MALWARE": 0
+      },
+      "MALWARE": {
+        "LEGITIMATE": 0,
+        "SUSPICIOUS": 0,
+        "PHISHING": 0,
+        "IMPERSONATION": 0,
+        "BEC_FRAUD": 0,
+        "MALWARE": 1
+      }
+    },
+    "validation_size": 6,
+    "synthetic_validation": false
+  },
+  "trained_at": "2026-09-23T17:46:13.647457+00:00"
 }

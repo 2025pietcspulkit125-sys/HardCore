@@ -11,7 +11,7 @@ type Provider = { enabled?: boolean; requires_key?: boolean };
 type IntelligenceStatus = { providers?: Record<string, Provider> };
 type AiStatus = { status?: string; provider?: string; model?: string };
 
-const nav = [["Dashboard", "/", "▦"], ["Analyze Email", "/analyze", "✉"], ["Investigations", "/investigations", "⌕"], ["Threat Graph", "/threat-graph", "◇"], ["Threat Intelligence", "/threat-intelligence", "◈"], ["AI Investigator", "/ai-investigator", "✦"], ["Reports", "/reports", "▤"], ["Settings", "/settings", "⚙"]];
+const nav = [["Dashboard", "/", "▦"], ["Investigation", "/investigations", "⌕"], ["Threat Graph", "/threat-graph", "◇"], ["Geolocation", "/threat-intelligence", "◈"], ["AI Help", "/ai-investigator", "✦"], ["Reports", "/reports", "▤"], ["Help", "/help", "?"]];
 
 export default function SettingsPage() {
   const [database, setDatabase] = useState<DatabaseStatus | null>(null);

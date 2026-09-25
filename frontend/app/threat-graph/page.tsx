@@ -101,13 +101,12 @@ type ViewFilter = "ALL" | "CASES" | "INDICATORS";
 
 const NAV = [
   { name: "Dashboard", path: "/", icon: "▦" },
-  { name: "Analyze Email", path: "/analyze", icon: "✉" },
-  { name: "Investigations", path: "/investigations", icon: "⌕" },
+  { name: "Investigation", path: "/investigations", icon: "⌕" },
   { name: "Threat Graph", path: "/threat-graph", icon: "◇" },
-  { name: "Threat Intelligence", path: "/threat-intelligence", icon: "◈" },
-  { name: "AI Investigator", path: "/ai-investigator", icon: "✦" },
+  { name: "Geolocation", path: "/threat-intelligence", icon: "◈" },
+  { name: "AI Help", path: "/ai-investigator", icon: "✦" },
   { name: "Reports", path: "/reports", icon: "▤" },
-  { name: "Settings", path: "/settings", icon: "⚙" },
+  { name: "Help", path: "/help", icon: "?" },
 ];
 
 const NODE_META: Record<
@@ -638,10 +637,7 @@ function ThreatGraphContent() {
           </div>
         </div>
 
-        <nav className="flex-1 px-3 py-5">
-          <div className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
-            Investigation
-          </div>
+        <nav className="flex-1 space-y-1 px-3 py-5">
 
           {NAV.map((item) => {
             const active = item.name === activePage;
@@ -650,7 +646,7 @@ function ThreatGraphContent() {
               <Link
                 key={item.name}
                 href={item.path}
-                className={`mb-1 flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm transition ${
+                className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-3 text-sm transition ${
                   active
                     ? "border border-blue-500/20 bg-blue-500/10 text-blue-300"
                     : "text-slate-400 hover:bg-white/5 hover:text-white"

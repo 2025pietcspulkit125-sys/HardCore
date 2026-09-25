@@ -1,16 +1,20 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from email import policy
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime, parseaddr
 
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from datetime import datetime, timezone, timedelta
 import hashlib
 import ipaddress
+import asyncio
+import base64
+import io
 import re
 import json
 import os
@@ -18,7 +22,54 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
+
+def _load_local_env() -> None:
+    """Load project .env values without requiring python-dotenv."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
+    # Preserve the credentials from the user's older local SAFE LETTER
+    # checkout during this migration. Values are loaded only into process
+    # memory; they are not copied into the active project or returned by API.
+    legacy_env = Path(r"D:\SAFE LETTER\SIH-2026-PS106\.env")
+    if legacy_env not in candidates:
+        candidates.append(legacy_env)
+    for env_path in candidates:
+        is_legacy_env = env_path == legacy_env
+        if not env_path.is_file():
+            continue
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            text = line.strip()
+            if not text or text.startswith("#") or "=" not in text:
+                continue
+            key, value = text.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key or key.startswith("export "):
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            # Empty assignments mean “use the application default”. Do not
+            # let a blank legacy setting override a safe default path/token.
+            # Project-local .env values take precedence over stale values
+            # inherited from an older terminal session. The legacy checkout is
+            # only a fallback for keys not configured locally.
+            if value and (not is_legacy_env or not os.environ.get(key, "").strip()):
+                os.environ[key] = value
+
+
+_load_local_env()
+
 from ml_classifier import classify as classify_with_local_ml
+from mailbox_connectors import NormalizedEmailMessage, oauth_state, provider_for
+from mailbox_ingestion import IngestionManager
+from mailbox_security import init_mailbox_store, record_event, record_mailbox_analysis, risk_policy
+from local_explainer import explain_analysis
 
 
 # ============================================================
@@ -144,11 +195,22 @@ def extract_ips(text: str):
     if not text:
         return []
 
-    pattern = r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"
-    candidates = re.findall(pattern, text)
+    ipv4_pattern = r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"
+    ipv6_pattern = r"(?<![A-Za-z0-9:])(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f:]{1,4}(?![A-Za-z0-9:])"
+    candidates = re.findall(ipv4_pattern, text) + re.findall(ipv6_pattern, text)
     valid_ips = []
 
     for candidate in candidates:
+        candidate = candidate.strip("[]()")
+        if "." not in candidate and ":" in candidate:
+            try:
+                parsed = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if parsed.version == 6:
+                valid_ips.append(candidate)
+            continue
+
         parts = candidate.split(".")
         if len(parts) != 4:
             continue
@@ -282,7 +344,10 @@ def get_email_body(message):
 
 def extract_attachments(message):
     """
-    Extract attachment metadata.
+    Extract bounded attachment metadata and safe static indicators.
+
+    Attachment bytes are used only for hashing/signature checks. They are never
+    executed, persisted as raw content, or passed to a shell.
     """
 
     attachments = []
@@ -296,13 +361,73 @@ def extract_attachments(message):
 
         payload = part.get_payload(decode=True)
 
+        payload = payload or b""
+        extension = Path(filename).suffix.lower()
+        magic = "unknown"
+        if payload.startswith(b"MZ"):
+            magic = "pe-executable"
+        elif payload.startswith(b"PK"):
+            magic = "zip-container"
+        elif payload.startswith(b"%PDF"):
+            magic = "pdf"
+        elif payload.startswith(b"\xD0\xCF\x11\xE0"):
+            magic = "ole-compound-document"
+        elif payload.lstrip().startswith((b"<", b"#!")):
+            magic = "text-or-script"
+        indicators = []
+        if magic == "pe-executable" or extension in HIGH_RISK_EXTENSIONS:
+            indicators.append("executable-or-script-indicator")
+        if extension in MACRO_DOCUMENT_EXTENSIONS:
+            indicators.append("macro-capable-extension")
+        if magic == "ole-compound-document" or b"vbaProject" in payload[:2_000_000]:
+            indicators.append("office-ole-or-vba-indicator")
+        if extension in ARCHIVE_EXTENSIONS:
+            indicators.append("archive-requires-bounded-recursion")
+        if len(payload) > 25 * 1024 * 1024:
+            indicators.append("attachment-size-limit-exceeded")
         attachments.append({
             "filename": filename,
             "content_type": part.get_content_type(),
-            "size": len(payload) if payload else 0
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "magic": magic,
+            "extension": extension,
+            "malware_indicators": indicators,
+            "analysis_limits": {"max_size_bytes": 25 * 1024 * 1024, "max_archive_depth": 3, "executed": False},
         })
 
     return attachments
+
+
+def _parse_received_header(raw_header: str, hop_number: int):
+    """Extract transport metadata without rewriting the original header."""
+    raw = str(raw_header or "")
+    source_match = re.search(r"\bfrom\s+([^\s(]+)(?:\s+\((.*?)\))?", raw, re.IGNORECASE)
+    destination_match = re.search(r"\bby\s+([^\s(]+)", raw, re.IGNORECASE)
+    protocol_match = re.search(r"\bwith\s+([A-Z0-9_-]+)", raw, re.IGNORECASE)
+    timestamp = raw.rsplit(";", 1)[1].strip() if ";" in raw else None
+    source_hostname = source_match.group(1) if source_match else None
+    source_detail = source_match.group(2) if source_match else ""
+    destination_hostname = destination_match.group(1) if destination_match else None
+    destination_detail_match = re.search(r"\bby\s+[^\s(]+\s*\((.*?)\)", raw, re.IGNORECASE)
+    destination_detail = destination_detail_match.group(1) if destination_detail_match else ""
+    destination_ip = next((ip for ip in extract_ips(destination_detail) if _is_valid_ip(ip)), None)
+    return {
+        "header_name": "Received",
+        "hop": hop_number,
+        "header_position": hop_number,
+        "raw": raw,
+        "ips": extract_ips(raw),
+        "source_hostname": source_hostname,
+        "source_ip": next((ip for ip in extract_ips(source_detail) if _is_valid_ip(ip)), None),
+        "destination_hostname": destination_hostname,
+        "destination_ip": destination_ip,
+        "timestamp": timestamp,
+        "protocol": protocol_match.group(1).upper() if protocol_match else None,
+        "esmtp": "ESMTP" in raw.upper(),
+        "tls": any(token in raw.upper() for token in ("TLS", "ESMTPS", "STARTTLS")),
+        "trust_level": "transport_header",
+    }
 
 
 def extract_received_headers(message):
@@ -315,14 +440,7 @@ def extract_received_headers(message):
     hops = []
 
     for index, header in enumerate(received_headers, start=1):
-
-        ips = extract_ips(header)
-
-        hops.append({
-            "hop": index,
-            "raw": header,
-            "ips": ips
-        })
+        hops.append(_parse_received_header(header, index))
 
     return hops
 
@@ -345,6 +463,8 @@ def analyze_smtp_sending_infrastructure(received_headers):
         return {
             "status": "not_available",
             "candidate": None,
+            "sender_origin_ip": None,
+            "sender_geolocation_available": False,
             "public_ip_candidates": [],
             "total_received_hops": 0,
             "basis": "No SMTP Received headers were available in the parsed email.",
@@ -384,6 +504,8 @@ def analyze_smtp_sending_infrastructure(received_headers):
         return {
             "status": "not_available",
             "candidate": None,
+            "sender_origin_ip": None,
+            "sender_geolocation_available": False,
             "public_ip_candidates": [],
             "total_received_hops": len(received_headers),
             "basis": "Received headers were present, but no valid public IP was visible in the chain.",
@@ -393,24 +515,27 @@ def analyze_smtp_sending_infrastructure(received_headers):
     selected = ordered_candidates[0]
 
     return {
-        "status": "candidate_identified",
+        "status": "infrastructure_observed",
         "candidate": {
             "ip": selected["ip"],
             "hop": selected["hop"],
             "source": "SMTP Received header",
-            "role": "earliest_visible_public_infrastructure",
+            "role": "UNKNOWN",
             "confidence": "medium",
         },
+        "sender_origin_ip": None,
+        "sender_geolocation_available": False,
         "public_ip_candidates": ordered_candidates,
         "total_received_hops": len(received_headers),
         "basis": (
-            "Selected the first valid public IP encountered while traversing "
-            "the available Received headers from the oldest visible hop toward the newest hop."
+            "Selected the first valid public IP encountered while traversing the available "
+            "Received headers from the oldest visible hop toward the newest hop, for route "
+            "visualization only. This is not sender-origin evidence."
         ),
         "interpretation": (
-            "This is the earliest externally routable infrastructure address visible "
-            "in the email's delivery path. It may belong to a mail relay or provider "
-            "rather than the sender's endpoint."
+            "This is the earliest externally routable infrastructure address visible in the "
+            "email's delivery path. It may belong to a mail relay or provider rather than the "
+            "sender's endpoint, so sender geolocation remains unavailable."
         ),
         "limitations": [
             "Mail providers can omit or replace originating client IP information.",
@@ -1146,6 +1271,28 @@ def analyze_attachments(attachments):
                     "Its contents require further inspection."
                 )
             })
+
+        # Signature checks supplement filename rules without executing bytes.
+        magic = str(attachment.get("magic") or "")
+        if magic == "pe-executable" and extension not in HIGH_RISK_EXTENSIONS:
+            findings.append({
+                "type": "extension-mismatch",
+                "severity": "high",
+                "detail": f"Attachment signature indicates a PE executable but the filename is {filename}.",
+            })
+        if magic == "zip-container" and extension not in ARCHIVE_EXTENSIONS and extension not in MACRO_DOCUMENT_EXTENSIONS:
+            findings.append({
+                "type": "container-extension-mismatch",
+                "severity": "medium",
+                "detail": f"Attachment {filename} has a ZIP/container signature and requires bounded archive inspection.",
+            })
+        for indicator in attachment.get("malware_indicators", []):
+            if indicator not in {"executable-or-script-indicator", "macro-capable-extension", "archive-requires-bounded-recursion"}:
+                findings.append({
+                    "type": "static-malware-indicator",
+                    "severity": "high" if "size" in indicator or "executable" in indicator else "medium",
+                    "detail": f"Safe static attachment check recorded {indicator} for {filename}.",
+                })
 
     return {
         "high_risk_files": high_risk,
@@ -2735,6 +2882,85 @@ async def analyze_email(
     )
     return analysis_result
 
+
+class _MemoryUpload:
+    """Small UploadFile-compatible adapter for mailbox RFC822 bytes."""
+
+    def __init__(self, payload: bytes, filename: str, content_type: str = "message/rfc822"):
+        self._payload = payload
+        self.filename = filename
+        self.content_type = content_type
+
+    async def read(self) -> bytes:
+        return self._payload
+
+
+async def analyze_mailbox_message(message: NormalizedEmailMessage) -> dict:
+    """Run a mailbox message through the same forensic pipeline as manual EML."""
+    filename = f"mailbox-{message.provider_message_id}.eml"
+    started_connection = get_db_connection()
+    try:
+        record_event(started_connection, "EMAIL_ANALYSIS_STARTED", {"provider": message.provider, "provider_message_id": message.provider_message_id})
+        started_connection.commit()
+    finally:
+        started_connection.close()
+    analysis = await analyze_email(_MemoryUpload(message.raw_bytes, filename))
+    analysis["mailbox"] = {"provider": message.provider, "provider_message_id": message.provider_message_id, "received_at": message.received_at, "thread_id": message.thread_id, "metadata": message.metadata}
+    connection = get_db_connection()
+    try:
+        record_event(connection, "EMAIL_RECEIVED", {"provider": message.provider, "provider_message_id": message.provider_message_id}, case_id=(analysis.get("investigation") or {}).get("case_id"))
+        mailbox_record = record_mailbox_analysis(connection, message, analysis)
+        policy_decision = mailbox_record.get("policy") or risk_policy(analysis)
+        case_id = mailbox_record.get("case_id")
+        record_event(connection, "CASE_CREATED", {"case_id": case_id}, email_id=mailbox_record["email_id"], case_id=case_id)
+        indicators = analysis.get("indicators") or {}
+        if indicators.get("urls") or indicators.get("ips") or analysis.get("attachments"):
+            record_event(connection, "INDICATOR_EXTRACTED", {"url_count": len(indicators.get("urls") or []), "ip_count": len(indicators.get("ips") or []), "attachment_count": len(analysis.get("attachments") or [])}, email_id=mailbox_record["email_id"], case_id=case_id)
+        detection = analysis.get("threat_detection") or {}
+        if str(detection.get("classification") or "LEGITIMATE").upper() != "LEGITIMATE" or int(detection.get("risk_score") or 0) >= 30:
+            record_event(connection, "THREAT_DETECTED", {"classification": detection.get("classification"), "risk_score": detection.get("risk_score")}, email_id=mailbox_record["email_id"], case_id=case_id)
+        action_result = {"action": policy_decision["action"], "status": "not-required", "reason": policy_decision}
+        if policy_decision["action"] in {"ALERT_REVIEW", "QUARANTINE"}:
+            alert_id = f"MAILALT-{uuid4().hex[:12].upper()}"
+            connection.execute("INSERT INTO email_alerts(alert_id,email_id,severity,message,created_at) VALUES(?,?,?,?,?)", (alert_id, mailbox_record["email_id"], str(detection.get("risk_level") or "MEDIUM"), f"Mailbox message scored {detection.get('risk_score', 0)}/100 as {detection.get('classification', 'UNKNOWN')}.", datetime.now(timezone.utc).isoformat()))
+            if case_id:
+                create_alert(case_id, str(detection.get("risk_level") or "MEDIUM"), "Mailbox risk alert", f"Mailbox message {message.provider_message_id} scored {detection.get('risk_score', 0)}/100.")
+        if policy_decision["action"] == "QUARANTINE":
+            existing_action = connection.execute("SELECT status, provider_response_json FROM email_actions WHERE email_id=? AND action='QUARANTINE'", (mailbox_record["email_id"],)).fetchone()
+            if existing_action:
+                action_result = {"action": "QUARANTINE", "status": existing_action[0], "provider_response": json.loads(existing_action[1] or "{}"), "idempotent": True}
+            else:
+                provider_result = ingestion_manager.provider.quarantine(message.provider_message_id) if ingestion_manager else {"status": "worker-not-ready"}
+                status = str(provider_result.get("status") or "error")
+                connection.execute("INSERT OR IGNORE INTO email_actions(action_id,email_id,action,status,reason_json,provider_response_json,created_at) VALUES(?,?,?,?,?,?,?)", (f"ACT-{uuid4().hex[:12].upper()}", mailbox_record["email_id"], "QUARANTINE", status, json.dumps(policy_decision), json.dumps(provider_result), datetime.now(timezone.utc).isoformat()))
+                action_result = {"action": "QUARANTINE", "status": status, "provider_response": provider_result, "idempotent": False}
+                if status.startswith("quarantined"):
+                    record_event(connection, "EMAIL_QUARANTINED", {"provider": message.provider, "provider_message_id": message.provider_message_id, "reason": policy_decision}, email_id=mailbox_record["email_id"], case_id=case_id)
+        explanation = explain_analysis(analysis)
+        record_event(connection, "RISK_UPDATED", {"risk_score": (analysis.get("threat_detection") or {}).get("risk_score"), "policy_action": policy_decision["action"]}, email_id=mailbox_record["email_id"], case_id=case_id)
+        connection.commit()
+        return {"status": "success", "email": mailbox_record, "action": action_result, "explanation": explanation, "analysis": analysis}
+    finally:
+        connection.close()
+
+
+ingestion_manager: IngestionManager | None = None
+oauth_states: dict[str, dict] = {}
+oauth_tokens: dict[str, str] = {}
+
+
+@app.on_event("startup")
+async def start_mailbox_ingestion() -> None:
+    global ingestion_manager
+    ingestion_manager = IngestionManager(analyze_mailbox_message)
+    await ingestion_manager.start()
+
+
+@app.on_event("shutdown")
+async def stop_mailbox_ingestion() -> None:
+    if ingestion_manager:
+        await ingestion_manager.stop()
+
 # ============================================================
 # CROSS-CASE CORRELATION / INVESTIGATION STORE
 # ============================================================
@@ -2926,6 +3152,33 @@ def init_case_store():
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_case_id ON audit_events(case_id)")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_ip_evidence (
+                ip_evidence_id TEXT PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                evidence_id TEXT NOT NULL,
+                indicator TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'UNKNOWN',
+                trust_level TEXT,
+                source TEXT,
+                header_position INTEGER,
+                raw_header TEXT,
+                source_hostname TEXT,
+                destination_hostname TEXT,
+                observed_at TEXT,
+                geolocation_provider TEXT,
+                lookup_timestamp TEXT,
+                latitude REAL,
+                longitude REAL,
+                location_status TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(case_id) REFERENCES cases(case_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_email_ip_evidence_indicator ON email_ip_evidence(indicator)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_email_ip_evidence_case ON email_ip_evidence(case_id)")
 
         connection.commit()
     finally:
@@ -3184,6 +3437,36 @@ def persist_case(analysis_result):
                 analysis_json,
             ),
         )
+        relay = analysis_result.get("smtp_relay") or []
+        relay_by_ip = {}
+        for hop in relay if isinstance(relay, list) else []:
+            if not isinstance(hop, dict):
+                continue
+            for indicator in hop.get("ips") or []:
+                indicator = str(indicator)
+                if _is_valid_ip(indicator):
+                    relay_by_ip.setdefault(indicator, []).append(hop)
+        for indicator in ips:
+            observations = relay_by_ip.get(indicator) or [{}]
+            for observation in observations:
+                connection.execute(
+                    """
+                    INSERT INTO email_ip_evidence (
+                        ip_evidence_id, case_id, evidence_id, indicator, role, trust_level,
+                        source, header_position, raw_header, source_hostname,
+                        destination_hostname, observed_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"IPE-{uuid4().hex[:16].upper()}", case_id, evidence_id, indicator,
+                        "INTERMEDIATE_RELAY" if observation else "UNKNOWN",
+                        observation.get("trust_level", "transport_header") if observation else "indicator_observation",
+                        "Received header / SMTP relay" if observation else "Email headers or content",
+                        observation.get("header_position"), observation.get("raw"),
+                        observation.get("source_hostname"), observation.get("destination_hostname"),
+                        observation.get("timestamp"), datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
         connection.commit()
     finally:
         connection.close()
@@ -3245,6 +3528,81 @@ def list_investigations(limit: int = 50):
         "status": "success",
         "count": len(cases),
         "cases": cases,
+    }
+
+
+@app.get("/api/geolocation/history")
+def geolocation_history(ip: str = "", limit: int = 100):
+    """Return observed-case history for a public IP without inventing location data."""
+    requested_ip = ip.strip()
+    if requested_ip and not _is_valid_ip(requested_ip):
+        raise HTTPException(status_code=400, detail="The history IP must be a valid IPv4 or IPv6 address.")
+
+    connection = get_db_connection()
+    try:
+        rows = connection.execute(
+            """
+            SELECT case_id, evidence_id, created_at, subject, sender, sender_domain,
+                   recipient, message_id, classification, risk_score, risk_level,
+                   confidence, ips_json, analysis_json
+            FROM cases
+            ORDER BY created_at DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    entries = []
+    for row in rows:
+        ips = _safe_json(row[12], [])
+        if requested_ip and requested_ip not in ips:
+            continue
+        analysis = _safe_json(row[13], {})
+        relay = analysis.get("smtp_relay") if isinstance(analysis, dict) else []
+        matching_hops = []
+        for hop in relay if isinstance(relay, list) else []:
+            if not isinstance(hop, dict):
+                continue
+            hop_ips = hop.get("ips") or []
+            if not requested_ip or requested_ip in hop_ips:
+                matching_hops.append(hop.get("hop"))
+        entries.append({
+            "case_id": row[0],
+            "evidence_id": row[1],
+            "observed_at": row[2],
+            "subject": row[3],
+            "sender": row[4],
+            "sender_domain": row[5],
+            "recipient": row[6],
+            "message_id": row[7],
+            "classification": row[8],
+            "risk_score": row[9],
+            "risk_level": row[10],
+            "confidence": row[11],
+            "ip": requested_ip or (ips[0] if ips else None),
+            "hop_numbers": matching_hops,
+        })
+        if len(entries) >= max(1, min(int(limit), 200)):
+            break
+
+    observed_dates = [entry["observed_at"] for entry in entries if entry.get("observed_at")]
+    return {
+        "status": "success",
+        "ip": requested_ip or None,
+        "summary": {
+            "observed_emails": len(entries),
+            "senders": len({entry.get("sender") for entry in entries if entry.get("sender")}),
+            "sender_domains": len({entry.get("sender_domain") for entry in entries if entry.get("sender_domain")}),
+            "recipients": len({entry.get("recipient") for entry in entries if entry.get("recipient")}),
+            "cases": len({entry.get("case_id") for entry in entries if entry.get("case_id")}),
+            "first_seen": min(observed_dates) if observed_dates else None,
+            "last_seen": max(observed_dates) if observed_dates else None,
+        },
+        "entries": entries,
+        "limitations": [
+            "Historical location is shown only when a stored geolocation lookup is available; this endpoint reports observed email/IP reuse and does not infer a city or country.",
+        ],
     }
 
 
@@ -3329,6 +3687,225 @@ def get_case_correlation(case_id: str):
 
 # Initialize the local investigation store on backend startup.
 init_case_store()
+connection = get_db_connection()
+try:
+    init_mailbox_store(connection)
+    connection.commit()
+finally:
+    connection.close()
+
+
+def _require_mailbox_access(x_mailbox_key: str | None) -> None:
+    configured_key = os.getenv("MAILBOX_API_KEY", "").strip()
+    if configured_key and x_mailbox_key != configured_key:
+        raise HTTPException(status_code=401, detail="Mailbox management requires the configured server-side API key.")
+
+
+@app.get("/api/mailbox/status")
+def mailbox_status(x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    return {"status": "success", "ingestion": ingestion_manager.public_status() if ingestion_manager else {"state": "STARTING"}}
+
+
+@app.get("/api/mailbox/accounts")
+def mailbox_accounts(x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    connection = get_db_connection()
+    try:
+        rows = connection.execute("SELECT account_id, provider, address, status, permissions_json, created_at, updated_at FROM mailbox_accounts ORDER BY updated_at DESC").fetchall()
+        return {"status": "success", "accounts": [{**dict(row), "permissions": json.loads(row[4] or "[]")} for row in rows]}
+    finally:
+        connection.close()
+
+
+@app.post("/api/mailbox/connect")
+def connect_mailbox(payload: dict, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    provider=str(payload.get("provider") or "imap").lower()
+    if provider not in {"gmail","microsoft_graph","imap","outlook","microsoft","google"}:
+        raise HTTPException(status_code=400, detail="Supported providers are gmail, microsoft_graph, and imap.")
+    normalized="gmail" if provider=="google" else "microsoft_graph" if provider in {"microsoft","outlook"} else provider
+    account_id=str(payload.get("account_id") or f"ACC-{uuid4().hex[:12].upper()}")
+    address=str(payload.get("address") or "")[:320]
+    permissions=payload.get("permissions") or ["read","quarantine"]
+    if normalized=="imap":
+        config={"host":str(payload.get("host") or "imap.gmail.com").strip(),"port":int(payload.get("port") or 993),"tls":bool(payload.get("tls",True)),"username":str(payload.get("username") or address).strip(),"password":str(payload.get("password") or ""),"folder":str(payload.get("folder") or "INBOX"),"quarantine_folder":str(payload.get("quarantine_folder") or "Quarantine")}
+        if not config["username"] or not config["password"]: raise HTTPException(status_code=400,detail="IMAP requires mailbox address/username and an App Password.")
+        provider_instance=provider_for("imap",config=config)
+        try: connection_test=provider_instance.test_connection()
+        except Exception as error: raise HTTPException(status_code=502,detail=f"IMAP connection failed: {str(error)[:260]}")
+        if ingestion_manager: ingestion_manager.configure_provider("imap",config=config)
+        os.environ["MAILBOX_PROVIDER"]="imap"; os.environ["MAILBOX_INGESTION_ENABLED"]="true"
+        status_payload=provider_instance.status(); status_payload["connection_test"]=connection_test
+    else:
+        raise HTTPException(status_code=503,detail=f"{normalized} OAuth is not configured on the backend. Use Generic IMAP for the local demo.")
+    connection=get_db_connection()
+    try:
+        timestamp=datetime.now(timezone.utc).isoformat()
+        connection.execute("INSERT INTO mailbox_accounts(account_id,provider,address,status,permissions_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET provider=excluded.provider,address=excluded.address,status=excluded.status,permissions_json=excluded.permissions_json,updated_at=excluded.updated_at",(account_id,normalized,address,"CONNECTED",json.dumps(permissions),timestamp,timestamp))
+        connection.execute("INSERT INTO mailbox_sync_state(account_id,state) VALUES(?,?) ON CONFLICT(account_id) DO UPDATE SET state=excluded.state",(account_id,"CONNECTED"))
+        connection.commit()
+    finally: connection.close()
+    if ingestion_manager: asyncio.create_task(ingestion_manager.start())
+    return {"status":"success","account_id":account_id,"provider":normalized,"provider_status":status_payload,"permissions":permissions,"note":"Mailbox credentials remain in backend memory only for this local session; never written to the forensic database."}
+
+
+@app.post("/api/mailbox/sync")
+async def sync_mailbox_now(x_mailbox_key: str | None = Header(default=None)):
+    """Run one immediate provider fetch without waiting for the poll interval."""
+    _require_mailbox_access(x_mailbox_key)
+    if ingestion_manager is None:
+        raise HTTPException(status_code=503, detail="Mailbox ingestion worker is not ready.")
+    provider_status = ingestion_manager.provider.status()
+    if not provider_status.get("configured") or ingestion_manager.provider_name in {"gmail", "microsoft_graph"} and not provider_status.get("connected"):
+        raise HTTPException(status_code=409, detail="Connect and authenticate a mailbox before starting a manual sync.")
+    try:
+        result = await ingestion_manager.sync_now()
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Mailbox sync failed: {str(error)[:260]}")
+    return {"status": "success", "sync": result, "ingestion": ingestion_manager.public_status()}
+
+
+@app.delete("/api/mailbox/accounts/{account_id}")
+def disconnect_mailbox(account_id: str, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    connection = get_db_connection()
+    try:
+        updated = connection.execute("UPDATE mailbox_accounts SET status='DISCONNECTED', updated_at=? WHERE account_id=?", (datetime.now(timezone.utc).isoformat(), account_id)).rowcount
+        connection.execute("UPDATE mailbox_sync_state SET state='PAUSED' WHERE account_id=?", (account_id,))
+        connection.commit()
+    finally:
+        connection.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Mailbox account not found.")
+    return {"status": "success", "account_id": account_id, "state": "DISCONNECTED"}
+
+
+@app.get("/api/mailbox/oauth/{provider}/start")
+def mailbox_oauth_start(provider: str, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    normalized = provider.lower()
+    if normalized not in {"gmail", "microsoft_graph"}:
+        raise HTTPException(status_code=400, detail="OAuth is available for gmail and microsoft_graph.")
+    state = oauth_state()
+    oauth_states[state] = {"provider": normalized, "created_at": datetime.now(timezone.utc).isoformat()}
+    adapter = provider_for(normalized)
+    provider_status = adapter.status()
+    if not provider_status.get("configured"):
+        oauth_states.pop(state, None)
+        missing = ", ".join(provider_status.get("missing_config") or ["OAuth client credentials"])
+        raise HTTPException(status_code=503, detail=f"{normalized} OAuth is not configured on the backend. Add: {missing} to the active project's .env file and restart the backend.")
+    return {"status": "success", "provider": normalized, "authorization_url": adapter.authorization_url(state), "state": state, "expires_in_seconds": 600}
+
+
+@app.get("/api/mailbox/oauth/{provider}/callback")
+async def mailbox_oauth_callback(provider: str, code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None):
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    if error:
+        message = quote(error_description or error, safe="")
+        return RedirectResponse(f"{frontend_url}/mailbox?oauth=error&message={message}", status_code=303)
+    state_data = oauth_states.pop(state or "", None)
+    if not state_data or state_data.get("provider") != provider.lower():
+        message = quote("Invalid or expired OAuth state.", safe="")
+        return RedirectResponse(f"{frontend_url}/mailbox?oauth=error&message={message}", status_code=303)
+    if not code:
+        message = quote("OAuth provider did not return an authorization code.", safe="")
+        return RedirectResponse(f"{frontend_url}/mailbox?oauth=error&message={message}", status_code=303)
+    adapter = provider_for(provider.lower())
+    try:
+        token_response = adapter.exchange_oauth_code(code)
+    except Exception as error:
+        message = quote(f"Mailbox OAuth exchange failed: {str(error)[:240]}", safe="")
+        return RedirectResponse(f"{frontend_url}/mailbox?oauth=error&message={message}", status_code=303)
+    access_token = str(token_response.get("access_token") or "")
+    if not access_token:
+        message = quote("Mailbox OAuth provider did not return an access token.", safe="")
+        return RedirectResponse(f"{frontend_url}/mailbox?oauth=error&message={message}", status_code=303)
+    # Keep the short-lived runtime token in memory only. Production deployments
+    # should replace this with a managed secret/token store and encryption at rest.
+    normalized = provider.lower()
+    oauth_tokens[normalized] = access_token
+    os.environ["MAILBOX_INGESTION_ENABLED"] = "true"
+    os.environ["MAILBOX_PROVIDER"] = normalized
+    if ingestion_manager:
+        ingestion_manager.provider_name = normalized
+        ingestion_manager.provider = provider_for(normalized, access_token)
+        ingestion_manager.state = "CONNECTED"
+        await ingestion_manager.start()
+    account_id = f"ACC-{uuid4().hex[:12].upper()}"
+    connection = get_db_connection()
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        connection.execute("INSERT INTO mailbox_accounts(account_id,provider,address,status,permissions_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (account_id, normalized, "", "CONNECTED", json.dumps(["read", "quarantine"]), timestamp, timestamp))
+        connection.execute("INSERT INTO mailbox_sync_state(account_id,state) VALUES(?,?)", (account_id, "CONNECTED"))
+        connection.commit()
+    finally:
+        connection.close()
+    return RedirectResponse(f"{frontend_url}/mailbox?oauth=connected&provider={normalized}", status_code=303)
+
+
+@app.get("/api/mail/oauth/google/callback")
+async def legacy_google_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None, error_description: str | None = None):
+    """Compatibility callback used by the original working Google OAuth client."""
+    return await mailbox_oauth_callback("gmail", code, state, error, error_description)
+
+
+@app.post("/api/mailbox/ingest")
+async def mailbox_ingest(payload: dict, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    raw = payload.get("raw_email")
+    if not isinstance(raw, str) or not raw.strip():
+        raise HTTPException(status_code=400, detail="raw_email must be a base64-encoded RFC822 message.")
+    try:
+        contents = base64.b64decode(raw, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise HTTPException(status_code=400, detail="raw_email is not valid base64.")
+    if len(contents) > int(os.getenv("MAILBOX_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024))):
+        raise HTTPException(status_code=413, detail="Mailbox message exceeds the configured size limit.")
+    message = NormalizedEmailMessage(str(payload.get("provider") or "manual_mailbox"), str(payload.get("provider_message_id") or hashlib.sha256(contents).hexdigest()), contents, str(payload.get("received_at") or datetime.now(timezone.utc).isoformat()), str(payload.get("thread_id") or ""), payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {})
+    if ingestion_manager is None:
+        raise HTTPException(status_code=503, detail="Mailbox ingestion worker is not ready.")
+    return await ingestion_manager.ingest(message)
+
+
+@app.get("/api/mailbox/feed")
+async def mailbox_feed(x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    async def events():
+        if not ingestion_manager:
+            yield "data: {\"type\":\"MAILBOX_NOT_READY\"}\n\n"
+            return
+        queue = ingestion_manager.subscribe()
+        try:
+            yield "event: ready\ndata: {\"status\":\"connected\"}\n\n"
+            while True:
+                event = await queue.get()
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            ingestion_manager.unsubscribe(queue)
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/mailbox/messages")
+def mailbox_messages(limit: int = 50, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    connection = get_db_connection()
+    try:
+        rows = connection.execute("SELECT m.email_id,m.provider,m.provider_message_id,m.case_id,m.received_at,m.processed_at,m.status,r.risk_score,r.risk_level,r.classification,r.confidence FROM email_messages m LEFT JOIN email_risk_scores r ON r.email_id=m.email_id ORDER BY m.received_at DESC LIMIT ?", (max(1, min(int(limit), 200)),)).fetchall()
+        return {"status": "success", "messages": [dict(row) for row in rows]}
+    finally:
+        connection.close()
+
+
+@app.get("/api/mailbox/events")
+def mailbox_events(limit: int = 50, x_mailbox_key: str | None = Header(default=None)):
+    _require_mailbox_access(x_mailbox_key)
+    connection = get_db_connection()
+    try:
+        rows = connection.execute("SELECT event_id,event_type,email_id,case_id,payload_json,created_at FROM mailbox_events ORDER BY created_at DESC LIMIT ?", (max(1, min(int(limit), 200)),)).fetchall()
+        return {"status": "success", "events": [{**dict(row), "payload": json.loads(row[4] or "{}")} for row in rows]}
+    finally:
+        connection.close()
 
 
 @app.get("/api/database/status")
@@ -4690,16 +5267,24 @@ def _ipwhois_lookup(ip):
     value = {
         "provider": "ipwho.is",
         "status": "ok",
+        "lookup_timestamp": datetime.now(timezone.utc).isoformat(),
+        "database_version": data.get("database_version"),
         "country": data.get("country"),
         "country_code": data.get("country_code"),
         "region": data.get("region"),
+        "region_code": data.get("region_code"),
         "city": data.get("city"),
+        "postal_code": data.get("postal"),
+        "continent": data.get("continent"),
         "latitude": data.get("latitude"),
         "longitude": data.get("longitude"),
+        "accuracy_radius": data.get("accuracy_radius"),
         "asn": connection.get("asn"),
         "organization": connection.get("org"),
         "isp": connection.get("isp"),
         "network_domain": connection.get("domain"),
+        "network": connection.get("network"),
+        "connection_type": connection.get("type"),
         "timezone": (data.get("timezone") or {}).get("id"),
         "security": {
             "anonymous": security.get("anonymous"),
@@ -4708,6 +5293,7 @@ def _ipwhois_lookup(ip):
             "tor": security.get("tor"),
             "hosting": security.get("hosting"),
             "relay": security.get("relay"),
+            "mobile": security.get("mobile"),
         },
         "source_note": "Approximate IP-associated location and network data.",
     }
@@ -5071,6 +5657,80 @@ def _build_ip_findings(scope, geo, abuse, vt):
     return findings
 
 
+def _classify_ip_role(ip, geo, reverse_dns, observed_in_received=False, transport=None):
+    """Classify an observed IP by forensic role, never by geolocation alone."""
+    if not _is_valid_ip(ip) or not _is_public_ip(ip):
+        return {
+            "role": "UNKNOWN",
+            "trust_level": "not_public",
+            "is_sender_origin": False,
+            "sender_geolocation_eligible": False,
+            "reason": "The address is not a globally routable public IP.",
+        }
+
+    geo = geo if isinstance(geo, dict) else {}
+    reverse_dns = reverse_dns if isinstance(reverse_dns, dict) else {}
+    security = geo.get("security") if isinstance(geo.get("security"), dict) else {}
+    text = " ".join(str(value or "") for value in (
+        geo.get("organization"), geo.get("isp"), geo.get("network_domain"),
+        reverse_dns.get("hostname"), " ".join(reverse_dns.get("aliases") or []),
+    )).lower()
+    asn = str(geo.get("asn") or "").lower().replace("as", "")
+
+    provider_patterns = (
+        "google", "googleusercontent", "googlemail", "gmail", "microsoft", "outlook",
+        "office365", "office 365", "protection.outlook", "amazon ses", "sendgrid",
+        "mailgun", "zoho", "yahoo mail",
+    )
+    provider_asns = {"15169", "396982", "8075", "16509", "14618", "20940", "14061"}
+    if any(pattern in text for pattern in provider_patterns) or asn in provider_asns:
+        return {
+            "role": "MAIL_PROVIDER",
+            "trust_level": "provider_attribution",
+            "is_sender_origin": False,
+            "sender_geolocation_eligible": False,
+            "reason": "Provider or ASN evidence identifies this address as mail/cloud infrastructure, not sender-origin evidence.",
+        }
+
+    if observed_in_received:
+        if security.get("hosting") is True or security.get("relay") is True:
+            role = "OUTBOUND_MAIL_RELAY"
+        else:
+            role = "INTERMEDIATE_RELAY"
+        return {
+            "role": role,
+            "trust_level": "transport_header",
+            "is_sender_origin": False,
+            "sender_geolocation_eligible": False,
+            "reason": "The address was observed in a Received header; transport evidence alone does not prove the sender endpoint.",
+        }
+
+    return {
+        "role": "UNKNOWN",
+        "trust_level": "indicator_observation",
+        "is_sender_origin": False,
+        "sender_geolocation_eligible": False,
+        "reason": "The address was observed in email evidence, but no trusted sender-origin relationship was established.",
+    }
+
+
+def _sender_source_assessment(payload, ip_results):
+    """Return a conservative sender-source statement for the UI and reports."""
+    headers = payload.get("headers") if isinstance(payload, dict) else {}
+    originating = headers.get("X-Originating-IP") if isinstance(headers, dict) else None
+    originating_ips = extract_ips(str(originating or "")) if originating else []
+    return {
+        "available": False,
+        "status": "UNAVAILABLE_FROM_EMAIL_TRANSPORT_EVIDENCE",
+        "ip": None,
+        "role": "SENDER_ORIGIN",
+        "trust_level": "not_established",
+        "reason": "No trustworthy public sender-origin IP was present in the preserved email headers.",
+        "untrusted_metadata_ips": originating_ips,
+        "interpretation": "A relay, provider, VPN, proxy, or datacenter IP must not be interpreted as the human sender's physical location.",
+    }
+
+
 def _provider_status():
     return {
         "ip_geolocation": {
@@ -5142,6 +5802,12 @@ async def _enrich_ip(ip, observed_in_received=False):
 
     findings = _build_ip_findings(scope, geo, abuse, vt)
     infrastructure = _classify_infrastructure(geo, abuse, vt)
+    role = _classify_ip_role(
+        ip,
+        geo,
+        reverse_dns,
+        observed_in_received=observed_in_received,
+    )
 
     if observed_in_received:
         source = "Received header / SMTP relay"
@@ -5171,6 +5837,11 @@ async def _enrich_ip(ip, observed_in_received=False):
         "observation": observation,
         "location_basis": location_basis,
         "observed_in_received": observed_in_received,
+        "role": role["role"],
+        "trust_level": role["trust_level"],
+        "is_sender_origin": role["is_sender_origin"],
+        "sender_geolocation_eligible": role["sender_geolocation_eligible"],
+        "role_reason": role["reason"],
         "reverse_dns": reverse_dns,
         "geolocation": geo,
         "abuseipdb": abuse,
@@ -5347,18 +6018,34 @@ async def threat_intelligence(payload: dict):
     )[:THREAT_INTEL_MAX_DOMAINS]
 
     received_ip_set = set()
+    received_context = {}
     raw_relay = payload.get("smtp_relay") or []
     if not isinstance(raw_relay, list):
         raw_relay = []
 
-    for hop in raw_relay:
+    for header_position, hop in enumerate(raw_relay, start=1):
         if not isinstance(hop, dict):
             continue
         hop_ips = hop.get("ips") or []
         if isinstance(hop_ips, list):
             for hop_ip in hop_ips:
                 if isinstance(hop_ip, str) and _is_valid_ip(hop_ip.strip()):
-                    received_ip_set.add(hop_ip.strip())
+                    normalized_ip = hop_ip.strip()
+                    received_ip_set.add(normalized_ip)
+                    received_context.setdefault(normalized_ip, []).append({
+                        "header_name": hop.get("header_name", "Received"),
+                        "hop": hop.get("hop", header_position),
+                        "header_position": hop.get("header_position", header_position),
+                        "raw_header": hop.get("raw", ""),
+                        "source_hostname": hop.get("source_hostname"),
+                        "destination_hostname": hop.get("destination_hostname"),
+                        "destination_ip": hop.get("destination_ip"),
+                        "timestamp": hop.get("timestamp"),
+                        "protocol": hop.get("protocol"),
+                        "esmtp": hop.get("esmtp"),
+                        "tls": hop.get("tls"),
+                        "trust_level": hop.get("trust_level", "transport_header"),
+                    })
 
     sending_infrastructure = analyze_smtp_sending_infrastructure(raw_relay)
 
@@ -5373,6 +6060,12 @@ async def threat_intelligence(payload: dict):
     ip_results = await asyncio.gather(
         *[_enrich_ip(ip, ip in received_ip_set) for ip in ips]
     ) if ips else []
+
+    for item in ip_results:
+        ip = item.get("indicator")
+        item["transport"] = received_context.get(ip, [])
+
+    sender_source = _sender_source_assessment(payload, ip_results)
 
     domain_results = await asyncio.gather(
         *[_enrich_domain(domain) for domain in domains]
@@ -5406,6 +6099,28 @@ async def threat_intelligence(payload: dict):
         if isinstance(evidence, dict):
             evidence_id = evidence.get("evidence_id")
 
+    if evidence_id:
+        connection = get_db_connection()
+        try:
+            for item in ip_results:
+                geo = item.get("geolocation") if isinstance(item.get("geolocation"), dict) else {}
+                connection.execute(
+                    """
+                    UPDATE email_ip_evidence
+                    SET role = ?, trust_level = ?, geolocation_provider = ?, lookup_timestamp = ?,
+                        latitude = ?, longitude = ?, location_status = ?
+                    WHERE evidence_id = ? AND indicator = ?
+                    """,
+                    (
+                        item.get("role", "UNKNOWN"), item.get("trust_level"), geo.get("provider"),
+                        geo.get("lookup_timestamp"), geo.get("latitude"), geo.get("longitude"),
+                        geo.get("status"), evidence_id, item.get("indicator"),
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
     return {
         "status": "success",
         "evidence_id": evidence_id,
@@ -5430,6 +6145,8 @@ async def threat_intelligence(payload: dict):
         "domain_intelligence": domain_results,
         "url_intelligence": url_results,
         "sending_infrastructure": sending_infrastructure,
+        "sender_source": sender_source,
+        "infrastructure_only": not sender_source["available"] and bool(ip_results),
         "smtp_relay_chain": raw_relay,
         "providers": _provider_status(),
         "limitations": [

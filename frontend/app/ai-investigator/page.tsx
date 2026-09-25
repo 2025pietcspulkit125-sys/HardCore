@@ -51,13 +51,12 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
 const navItems = [
   { name: "Dashboard", path: "/", icon: "▦" },
-  { name: "Analyze Email", path: "/analyze", icon: "✉" },
-  { name: "Investigations", path: "/investigations", icon: "⌕" },
+  { name: "Investigation", path: "/investigations", icon: "⌕" },
   { name: "Threat Graph", path: "/threat-graph", icon: "◇" },
-  { name: "Threat Intelligence", path: "/threat-intelligence", icon: "◈" },
-  { name: "AI Investigator", path: "/ai-investigator", icon: "✦" },
+  { name: "Geolocation", path: "/threat-intelligence", icon: "◈" },
+  { name: "AI Help", path: "/ai-investigator", icon: "✦" },
   { name: "Reports", path: "/reports", icon: "▤" },
-  { name: "Settings", path: "/settings", icon: "⚙" },
+  { name: "Help", path: "/help", icon: "?" },
 ];
 
 const quickQuestions = [
@@ -212,11 +211,9 @@ function AIInvestigatorContent() {
           <div className="text-xl font-bold tracking-wide">MailTrace <span className="text-blue-500">AI</span></div>
           <div className="mt-1 text-[10px] uppercase tracking-[0.22em] text-slate-500">Email Forensics Platform</div>
         </div>
-        <nav className="flex-1 px-3 py-5">
-          <div className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Workspace</div>
-          <div className="space-y-1">
+        <nav className="flex-1 space-y-1 px-3 py-5">
             {navItems.map(item => {
-              const active = item.name === "AI Investigator";
+              const active = item.name === "AI Help";
               return (
                 <button
                   key={item.name}
@@ -229,7 +226,6 @@ function AIInvestigatorContent() {
                 </button>
               );
             })}
-          </div>
         </nav>
         <div className="border-t border-slate-800 px-5 py-4 text-[10px] leading-5 text-slate-600">
           AI Investigator grounds answers in stored case evidence and observable indicators.
@@ -241,7 +237,7 @@ function AIInvestigatorContent() {
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <div className="text-xs uppercase tracking-[0.2em] text-blue-400">Forensic reasoning</div>
-              <h1 className="mt-2 text-3xl font-bold">AI Investigator</h1>
+              <h1 className="mt-2 text-3xl font-bold">AI Help</h1>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
                 Ask evidence-grounded questions about a stored investigation, its indicators, authentication, relay path and cross-case relationships.
               </p>

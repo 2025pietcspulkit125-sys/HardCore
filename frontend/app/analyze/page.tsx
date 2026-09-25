@@ -148,13 +148,12 @@ interface AnalysisResult {
 
 const sidebarItems = [
   { name: "Dashboard", icon: "▣", path: "/" },
-  { name: "Analyze Email", icon: "✉", path: "/analyze" },
-  { name: "Investigations", icon: "⌕", path: "/investigations" },
+  { name: "Investigation", icon: "⌕", path: "/investigations" },
   { name: "Threat Graph", icon: "◎", path: "/threat-graph" },
-  { name: "Threat Intelligence", icon: "◈", path: "/threat-intelligence" },
-  { name: "AI Investigator", icon: "✦", path: "/ai-investigator" },
+  { name: "Geolocation", icon: "◈", path: "/threat-intelligence" },
+  { name: "AI Help", icon: "✦", path: "/ai-investigator" },
   { name: "Reports", icon: "▤", path: "/reports" },
-  { name: "Settings", icon: "⚙", path: "/settings" },
+  { name: "Help", icon: "?", path: "/help" },
 ];
 
 

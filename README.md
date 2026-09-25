@@ -37,7 +37,11 @@ Copy `.env.example` values into the backend environment when needed:
 - `VIRUSTOTAL_API_KEY` and `ABUSEIPDB_API_KEY` enable optional reputation enrichment.
 - `OPENAI_API_KEY` and `OPENAI_MODEL` enable the optional evidence-grounded AI provider. Without a key, deterministic AI Investigator fallback remains active.
 
-The local ML classifier uses separated synthetic training data in `backend/ml_data/`, a generated model artifact, and transparent token likelihoods. Retrain it with `backend/venv/Scripts/python.exe backend/train_ml_model.py` to print accuracy, precision, recall, and F1 metrics. It is a locally trained lightweight classifier suitable for prototype/SIH demonstration, does not represent real-world threat prevalence, and never replaces the deterministic forensic engine. `MAILTRACE_ALERT_THRESHOLD` optionally controls the local alert threshold and defaults to `80`.
+The local ML classifier uses separated synthetic training data in `backend/ml_data/`, a generated model artifact, and transparent token likelihoods. Retrain it with `backend/venv/Scripts/python.exe backend/train_ml_model.py --evaluate` or predict with `backend/venv/Scripts/python.exe backend/train_ml_model.py --predict "urgent verify account"`. `--augment` adds explicitly synthetic training rows and never changes the holdout validation set. It is a locally trained lightweight classifier suitable for prototype/SIH demonstration, does not represent real-world threat prevalence, and never replaces the deterministic forensic engine.
+
+Mailbox mode is available at `/mailbox`. Configure the backend from `.env.example`, select Gmail, Microsoft Graph, or IMAP, and set `MAILBOX_INGESTION_ENABLED=true` only after credentials and permissions are validated. The worker uses provider polling with exponential backoff, deduplicates by provider ID/content hash, and publishes live events through SSE with polling fallback. `AUTO_QUARANTINE_ENABLED=false` is the safe default; enabling it moves/labels mail through the provider and records the policy decision, model version, provider response, and evidence references. Mail is never permanently deleted by this application.
+
+The local explanation layer uses Ollama only when `LLM_PROVIDER=ollama`; otherwise it returns deterministic, evidence-cited JSON. It receives minimized forensic evidence, not unrestricted mailbox access. The LoRA-ready explanation schema is in `ai/training/email_security_explanations.jsonl`.
 
 ## Main workflow
 
