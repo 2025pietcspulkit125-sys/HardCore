@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-const nav = [["Dashboard","/","▦"],["Investigation","/investigations","⌕"],["Threat Graph","/threat-graph","◇"],["Geolocation","/threat-intelligence","◈"],["AI Help","/ai-investigator","✦"],["Reports","/reports","▤"],["Help","/help","?"]];
+const nav = [["Dashboard","/","â–¦"],["Investigation","/investigations","âŒ•"],["Threat Graph","/threat-graph","â—‡"],["Geolocation","/threat-intelligence","â—ˆ"],["AI Help","/ai-investigator","âœ¦"],["Reports","/reports","â–¤"],["Help","/help","?"]];
 
 type MailboxStatus={ingestion?:{state?:string;provider?:string;provider_status?:{configured?:boolean;connected?:boolean;missing_config?:string[]};last_error?:string}};
 type MailMessage={email_id:string;provider:string;provider_message_id:string;case_id?:string;received_at:string;status:string;risk_score?:number;risk_level?:string;classification?:string};
@@ -16,7 +16,7 @@ export default function MailboxPage(){
   const [status,setStatus]=useState<MailboxStatus|null>(null);
   const [messages,setMessages]=useState<MailMessage[]>([]);
   const [events,setEvents]=useState<string[]>([]);
-  const [provider,setProvider]=useState("gmail");
+  const [provider,setProvider]=useState("imap");
   const [address,setAddress]=useState("");
   const [username,setUsername]=useState("");
   const [password,setPassword]=useState("");
@@ -53,7 +53,7 @@ export default function MailboxPage(){
           const data=JSON.parse(event.data) as EventItem;
           const label=data.type || "EVENT";
           const id=data.message?.provider_message_id || data.result?.email?.case_id || "processed";
-          setEvents(cur=>[(label+" · "+id),...cur].slice(0,12));
+          setEvents(cur=>[(label+" Â· "+id),...cur].slice(0,12));
           void refresh();
         }catch{}
       };
@@ -122,15 +122,15 @@ export default function MailboxPage(){
 
       <div className="mt-8 grid gap-4 md:grid-cols-4">
         <div className="rounded-xl border border-slate-800 bg-[#0d1420] p-5"><p className="text-xs uppercase text-slate-500">Worker state</p><p className="mt-3 text-2xl font-bold">{worker?.state||"STARTING"}</p><p className="mt-2 text-xs text-slate-500">{worker?.last_error||"Polling and SSE are available."}</p></div>
-        <div className="rounded-xl border border-slate-800 bg-[#0d1420] p-5"><p className="text-xs uppercase text-slate-500">Provider</p><p className="mt-3 text-2xl font-bold">{worker?.provider||"gmail"}</p><p className="mt-2 text-xs text-slate-500">{configured?"Configured":missingConfig?"Missing: "+missingConfig:"Credentials not configured"}</p></div>
+        <div className="rounded-xl border border-slate-800 bg-[#0d1420] p-5"><p className="text-xs uppercase text-slate-500">Provider</p><p className="mt-3 text-2xl font-bold">{worker?.provider||"imap"}</p><p className="mt-2 text-xs text-slate-500">{configured?"Configured":missingConfig?"Missing: "+missingConfig:"Credentials not configured"}</p></div>
         <div className="rounded-xl border border-slate-800 bg-[#0d1420] p-5"><p className="text-xs uppercase text-slate-500">Analyzed mail</p><p className="mt-3 text-2xl font-bold">{messages.length}</p><p className="mt-2 text-xs text-slate-500">{connected?"Live mailbox worker":"Waiting for mailbox"}</p></div>
         <div className="rounded-xl border border-slate-800 bg-[#0d1420] p-5"><p className="text-xs uppercase text-slate-500">Quarantine</p><p className="mt-3 text-2xl font-bold text-emerald-300">OFF</p><p className="mt-2 text-xs text-slate-500">Safe default for testing</p></div>
       </div>
       <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_360px]">
         <section id="mailbox-connection" className="rounded-2xl border border-slate-800 bg-[#0d1420] p-6">
-          <div className="flex items-center justify-between"><div><h2 className="font-semibold">Mailbox connection</h2><p className="mt-1 text-xs text-slate-500">Credentials are sent only to your local backend and kept in memory for this session.</p></div><button onClick={()=>void refresh()} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300">Refresh</button></div>
+          <div className="flex items-center justify-between"><div><h2 className="font-semibold">Mailbox connection</h2><p className="mt-1 text-xs text-slate-500">Credentials are sent over HTTPS to the MailTrace backend and kept in memory for this session; use a dedicated test mailbox and App Password.</p></div><button onClick={()=>void refresh()} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300">Refresh</button></div>
           <div className="mt-5 grid gap-3 md:grid-cols-2">
-            <select value={provider} onChange={e=>setProvider(e.target.value)} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"><option value="imap">Generic IMAP — Gmail / other</option><option value="gmail">Gmail OAuth</option><option value="microsoft_graph">Microsoft Graph OAuth</option></select>
+            <select value={provider} onChange={e=>setProvider(e.target.value)} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"><option value="imap">Generic IMAP â€” Gmail / other</option><option value="gmail">Gmail OAuth</option><option value="microsoft_graph">Microsoft Graph OAuth</option></select>
             <input value={address} onChange={e=>setAddress(e.target.value)} placeholder="Mailbox address, e.g. test@gmail.com" className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"/>
             {provider==="imap"&&<>
               <input value={username} onChange={e=>setUsername(e.target.value)} placeholder="IMAP username (usually email)" className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"/>
@@ -141,11 +141,11 @@ export default function MailboxPage(){
             </>}
             <button disabled={connecting} onClick={()=>void connect()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold disabled:opacity-50">{connecting?"Opening connection...":provider==="imap"?"Connect & Start Worker":"Connect "+(provider==="gmail"?"Gmail":"Microsoft")}</button>
           </div>
-          <p className="mt-3 text-xs text-slate-500">Gmail OAuth opens Google consent securely. For local IMAP, use imap.gmail.com, port 993, TLS, and a Google App Password—never your normal Gmail password.</p>
+          <p className="mt-3 text-xs text-slate-500">Gmail OAuth opens Google consent securely. For local IMAP, use imap.gmail.com, port 993, TLS, and a Google App Passwordâ€”never your normal Gmail password.</p>
 
           <h2 className="mt-8 font-semibold">Live inbox risk feed</h2>
           <div className="mt-4 space-y-3">
-            {messages.length?messages.map(item=><div key={item.email_id} className="rounded-xl border border-slate-800 bg-[#0a111c] p-4"><div className="flex items-center justify-between gap-3"><span className="font-mono text-xs text-blue-300">{item.email_id}</span><span className={"text-xs font-semibold "+levelClass(item.risk_level)}>{item.risk_level||"PENDING"} · {item.risk_score??"—"}/100</span></div><p className="mt-2 text-sm">{item.classification||"Processing"}</p><p className="mt-1 text-xs text-slate-500">{item.provider} · {item.provider_message_id} · {item.status}</p>{item.case_id&&<Link className="mt-2 inline-block text-xs text-blue-400" href={"/investigations?case_id="+encodeURIComponent(item.case_id)}>Open forensic investigation →</Link>}</div>):<p className="rounded-lg border border-dashed border-slate-700 p-8 text-center text-sm text-slate-500">No mailbox messages yet. Connect a mailbox above and then send a test email.</p>}
+            {messages.length?messages.map(item=><div key={item.email_id} className="rounded-xl border border-slate-800 bg-[#0a111c] p-4"><div className="flex items-center justify-between gap-3"><span className="font-mono text-xs text-blue-300">{item.email_id}</span><span className={"text-xs font-semibold "+levelClass(item.risk_level)}>{item.risk_level||"PENDING"} Â· {item.risk_score??"â€”"}/100</span></div><p className="mt-2 text-sm">{item.classification||"Processing"}</p><p className="mt-1 text-xs text-slate-500">{item.provider} Â· {item.provider_message_id} Â· {item.status}</p>{item.case_id&&<Link className="mt-2 inline-block text-xs text-blue-400" href={"/investigations?case_id="+encodeURIComponent(item.case_id)}>Open forensic investigation â†’</Link>}</div>):<p className="rounded-lg border border-dashed border-slate-700 p-8 text-center text-sm text-slate-500">No mailbox messages yet. Connect a mailbox above and then send a test email.</p>}
           </div>
         </section>
         <section className="rounded-2xl border border-slate-800 bg-[#0d1420] p-6"><h2 className="font-semibold">Processing events</h2><p className="mt-1 text-xs text-slate-500">SSE with polling fallback.</p><div className="mt-4 space-y-2">{events.length?events.map((event,index)=><div key={event+index} className="rounded-lg border border-slate-800 bg-[#0a111c] p-3 text-xs text-slate-400">{event}</div>):<p className="mt-5 text-sm text-slate-600">Waiting for mailbox activity.</p>}</div><div className="mt-8 border-t border-slate-800 pt-5"><h3 className="text-sm font-semibold">Safety controls</h3><p className="mt-3 text-xs leading-5 text-slate-500">Original email evidence is hashed. Attachments are never executed. Automatic quarantine stays OFF until explicitly enabled.</p></div></section>
